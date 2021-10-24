@@ -1,0 +1,12 @@
+numpy==1.19.5
+scipy==1.5.3
+torch==1.8.1
+librosa==0.8.1
+pysptk==0.1.18
+soundfile==0.10.2
+matplotlib==3.3.4
+tqdm==4.60.0
+six==1.16.0
+tensorboard==2.5.0
+python-speech-features==0.6
+wavenet-vocoder==0.1.1
