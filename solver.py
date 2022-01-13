@@ -1,4 +1,5 @@
-from model import Generator_loop as Generator
+from model import Encoder_cyc as Encoder
+from model import Decoder_cyc as Decoder
 from model import InterpLnr
 import matplotlib.pyplot as plt
 import torch
@@ -57,15 +58,18 @@ class Solver(object):
             self.build_tensorboard()
 
             
-    def build_model(self):        
-        self.G = Generator(self.hparams)
+    def build_model(self):
+        self.E = Encoder(self.hparams)
+        self.D = Decoder(self.hparams)
         
         self.Interp = InterpLnr(self.hparams)
             
-        self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
-        self.print_network(self.G, 'G')
-        
-        self.G.to(self.device)
+        self.g_optimizer = torch.optim.Adam([{'params': self.E.parameters()}, {'params': self.D.parameters()}], self.g_lr, [self.beta1, self.beta2])
+        self.print_network(self.E, 'E')
+        self.print_network(self.D, 'D')
+
+        self.E.to(self.device)
+        self.D.to(self.device)
         self.Interp.to(self.device)
 
         
@@ -88,7 +92,8 @@ class Solver(object):
         print('Loading the trained models from step {}...'.format(resume_iters))
         G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(resume_iters))
         g_checkpoint = torch.load(G_path, map_location=lambda storage, loc: storage)
-        self.G.load_state_dict(g_checkpoint['model'])
+        self.E.load_state_dict(g_checkpoint['encoder'])
+        self.D.load_state_dict(g_checkpoint['decoder'])
         self.g_optimizer.load_state_dict(g_checkpoint['optimizer'])
         self.g_lr = self.g_optimizer.param_groups[0]['lr']
         
@@ -129,7 +134,6 @@ class Solver(object):
         print ('Current learning rates, g_lr: {}.'.format(g_lr))
         
         # Print logs in specified order
-        #keys = ['G/loss_id']
         keys = ['G/loss', 'G/loss_x', 'G/loss_f0', 'G/loss_z']
 
         # Start training.
@@ -157,8 +161,8 @@ class Solver(object):
             # =================================================================================== #
             #                               2. Train the generator                                #
             # =================================================================================== #
-            
-            self.G = self.G.train()
+            self.E = self.E.train()
+            self.D = self.D.train()
                         
             # Identity mapping loss
             x_f0 = torch.cat((x_real_org, f0_org), dim=-1)
@@ -167,10 +171,30 @@ class Solver(object):
             f0_org_intrp = quantize_f0_torch(x_f0_intrp[:,:,-1])[0]
             x_f0_intrp_org = torch.cat((x_f0_intrp[:,:,:-1], f0_org_intrp), dim=-1)
 
-            x_identic, f0_identic, g_loss_z = self.G(x_f0_intrp_org, x_real_org, emb_org, mode='train')
+            codes_r, codes_c, codes_f = self.E(x_f0_intrp_org, x_real_org)
+            x_identic, f0_identic = self.D(emb_org, codes_r, codes_c, codes_f, mode='train')
+
+            z_select = torch.randint(0, 4, (1,))[0]
+            ord_sfl = torch.randperm(x_real_org.shape[0])
+            if z_select == 0:
+                codes_r = codes_r[ord_sfl]
+            elif z_select == 1:
+                codes_c = codes_c[ord_sfl]
+            elif z_select == 2:
+                codes_f = codes_f[ord_sfl]
+            else:
+                emb_org = emb_org[ord_sfl]
+            x_identic_cyc, f0_identic_cyc = self.D(emb_org, codes_r, codes_c, codes_f, mode='train')
+            x_f0_cyc = torch.cat((x_identic_cyc, f0_identic_cyc), dim=-1)
+            codes_cyc_r, codes_cyc_c, codes_cyc_f = self.E(x_f0_cyc, x_identic_cyc)
+
+            codes_org = torch.cat((codes_r.reshape(x_real_org.shape[0], -1), codes_c.reshape(x_real_org.shape[0], -1), codes_f.reshape(x_real_org.shape[0], -1)), dim=-1)
+            codes_cyc = torch.cat((codes_cyc_r.reshape(x_real_org.shape[0], -1), codes_cyc_c.reshape(x_real_org.shape[0], -1), codes_cyc_f.reshape(x_real_org.shape[0], -1)), dim=-1)
+
             g_loss_x = 0.2 * F.mse_loss(x_real_org, x_identic, reduction='mean') 
             g_loss_f0 = F.mse_loss(f0_org_q, f0_identic, reduction='mean') 
-           
+            g_loss_z = F.mse_loss(codes_org, codes_cyc, reduction='mean')
+
             # Backward and optimize.
             g_loss = g_loss_x + g_loss_f0 + g_loss_z
             self.reset_grad()
@@ -206,63 +230,90 @@ class Solver(object):
             # Save model checkpoints.
             if (i+1) % self.model_save_step == 0:
                 G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(i+1))
-                torch.save({'model': self.G.state_dict(),
+                torch.save({'encoder': self.E.state_dict(),
+                            'decoder': self.D.state_dict(),
                             'optimizer': self.g_optimizer.state_dict()}, G_path)
                 print('Saved model checkpoints into {}...'.format(self.model_save_dir))            
             
 
             # Validation.
             if (i+1) % self.valid_step == 0:
-                self.G = self.G.eval()
+                self.E = self.E.eval()
+                self.D = self.D.eval()
                 with torch.no_grad():
                     loss_val = []
                     for val_sub in self.validation_pt:
-                        emb_org_val = torch.from_numpy(val_sub[1]).to(self.device)         
+                        emb_val = torch.from_numpy(val_sub[1]).to(self.device)
                         for k in range(2, 3):
                             x_real_pad, _ = pad_seq_to_2(val_sub[k][0][np.newaxis,:,:], self.len_pad)
-                            len_org = torch.tensor([val_sub[k][2]]).to(self.device) 
-                            f0_org = np.pad(val_sub[k][1], (0, self.len_pad-val_sub[k][2]), 'constant', constant_values=(0, 0))
-                            f0_quantized = quantize_f0_numpy(f0_org)[0]
+                            len_val = torch.tensor([val_sub[k][2]]).to(self.device)
+                            f0_val = np.pad(val_sub[k][1], (0, self.len_pad-val_sub[k][2]), 'constant', constant_values=(0, 0))
+                            f0_quantized = quantize_f0_numpy(f0_val)[0]
                             f0_onehot = f0_quantized[np.newaxis, :, :]
-                            f0_org_val = torch.from_numpy(f0_onehot).to(self.device) 
-                            x_real_pad = torch.from_numpy(x_real_pad).to(self.device) 
+                            f0_org_val = torch.from_numpy(f0_onehot).to(self.device)
+                            x_real_pad = torch.from_numpy(x_real_pad).to(self.device)
                             x_f0 = torch.cat((x_real_pad, f0_org_val), dim=-1)
-                            x_identic_val, f0_identic_val, g_loss_val_z = self.G(x_f0, x_real_pad, emb_org_val, mode='train')
+                            codes_val_r, codes_val_c, codes_val_f = self.E(x_f0, x_real_pad)
+                            x_identic_val, f0_identic_val = self.D(emb_val, codes_val_r, codes_val_c, codes_val_f, mode='train')
+                            z_select = torch.randint(0, 4, (1,))[0]
+
+                            ord_sfl_val = torch.randperm(x_real_pad.shape[0])
+                            if z_select == 0:
+                                codes_val_r = codes_val_r[ord_sfl_val]
+                            elif z_select == 1:
+                                codes_val_c = codes_val_c[ord_sfl_val]
+                            elif z_select == 2:
+                                codes_val_f = codes_val_f[ord_sfl_val]
+                            else:
+                                emb_val = emb_val[ord_sfl_val]
+                            x_identic_cyc_val, f0_identic_cyc_val = self.D(emb_val, codes_val_r, codes_val_c, codes_val_f, mode='train')
+                            x_f0_cyc_val = torch.cat((x_identic_cyc_val, f0_identic_cyc_val), dim=-1)
+                            codes_val_cyc_r, codes_val_cyc_c, codes_val_cyc_f = self.E(x_f0_cyc_val, x_identic_cyc_val)
+
+                            codes_val_org = torch.cat((codes_val_r.reshape(x_real_pad.shape[0], -1), codes_val_c.reshape(x_real_pad.shape[0], -1), codes_val_f.reshape(x_real_pad.shape[0], -1)), dim=-1)
+                            codes_val_cyc = torch.cat((codes_val_cyc_r.reshape(x_real_pad.shape[0], -1), codes_val_cyc_c.reshape(x_real_pad.shape[0], -1), codes_val_cyc_f.reshape(x_real_pad.shape[0], -1)), dim=-1)
+
                             g_loss_val_x = 0.2 * F.mse_loss(x_real_pad, x_identic_val, reduction='mean')
                             g_loss_val_f0 = F.mse_loss(f0_org_val, f0_identic_val, reduction='mean')
+                            g_loss_val_z = F.mse_loss(codes_val_org, codes_val_cyc, reduction='mean')
                             g_loss_val = g_loss_val_x + g_loss_val_f0 + g_loss_val_z
                             loss_val.append(g_loss_val.item())
                 val_loss = np.mean(loss_val)
                 print('Validation loss: {}'.format(val_loss))
                 if self.use_tensorboard:
                     self.writer.add_scalar('Validation_loss', val_loss, i+1)
-                    
+
 
             # plot test samples
             if (i+1) % self.sample_step == 0:
-                self.G = self.G.eval()
+                self.E = self.E.eval()
+                self.D = self.D.eval()
                 with torch.no_grad():
-                    for val_sub in self.validation_pt:
-                        emb_org_val = torch.from_numpy(val_sub[1]).to(self.device)         
+                    for smp_sub in self.validation_pt:
+                        emb_smp = torch.from_numpy(smp_sub[1]).to(self.device)         
                         for k in range(2, 3):
-                            x_real_pad, _ = pad_seq_to_2(val_sub[k][0][np.newaxis,:,:], self.len_pad)
-                            len_org = torch.tensor([val_sub[k][2]]).to(self.device) 
-                            f0_org = np.pad(val_sub[k][1], (0, self.len_pad-val_sub[k][2]), 'constant', constant_values=(0, 0))
-                            f0_quantized = quantize_f0_numpy(f0_org)[0]
+                            x_real_pad, _ = pad_seq_to_2(smp_sub[k][0][np.newaxis,:,:], self.len_pad)
+                            len_smp = torch.tensor([smp_sub[k][2]]).to(self.device) 
+                            f0_smp = np.pad(smp_sub[k][1], (0, self.len_pad-smp_sub[k][2]), 'constant', constant_values=(0, 0))
+                            f0_quantized = quantize_f0_numpy(f0_smp)[0]
                             f0_onehot = f0_quantized[np.newaxis, :, :]
-                            f0_org_val = torch.from_numpy(f0_onehot).to(self.device) 
+                            f0_org_smp = torch.from_numpy(f0_onehot).to(self.device) 
                             x_real_pad = torch.from_numpy(x_real_pad).to(self.device) 
-                            x_f0 = torch.cat((x_real_pad, f0_org_val), dim=-1)
-                            x_f0_F = torch.cat((x_real_pad, torch.zeros_like(f0_org_val)), dim=-1)
-                            x_f0_C = torch.cat((torch.zeros_like(x_real_pad), f0_org_val), dim=-1)
+                            x_f0 = torch.cat((x_real_pad, f0_org_smp), dim=-1)
+                            x_f0_F = torch.cat((x_real_pad, torch.zeros_like(f0_org_smp)), dim=-1)
+                            x_f0_C = torch.cat((torch.zeros_like(x_real_pad), f0_org_smp), dim=-1)
                             
-                            x_identic_val, _, _ = self.G(x_f0, x_real_pad, emb_org_val, mode='train')
-                            x_identic_woF, _, _ = self.G(x_f0_F, x_real_pad, emb_org_val, mode='train')
-                            x_identic_woR, _, _ = self.G(x_f0, torch.zeros_like(x_real_pad), emb_org_val, mode='train')
-                            x_identic_woC, _, _ = self.G(x_f0_C, x_real_pad, emb_org_val, mode='train')
-                            
+                            codes_r, codes_c, codes_f = self.E(x_f0, x_real_pad)
+                            x_identic_smp = self.D(emb_smp, codes_r, codes_c, codes_f, mode='test')
+                            codes_r, codes_c, codes_f = self.E(x_f0_F, x_real_pad)
+                            x_identic_woF = self.D(emb_smp, codes_r, codes_c, codes_f, mode='test')
+                            codes_r, codes_c, codes_f = self.E(x_f0, torch.zeros_like(x_real_pad))
+                            x_identic_woR = self.D(emb_smp, codes_r, codes_c, codes_f, mode='test')
+                            codes_r, codes_c, codes_f = self.E(x_f0_C, x_real_pad)
+                            x_identic_woC = self.D(emb_smp, codes_r, codes_c, codes_f, mode='test')
+
                             melsp_gd_pad = x_real_pad[0].cpu().numpy().T
-                            melsp_out = x_identic_val[0].cpu().numpy().T
+                            melsp_out = x_identic_smp[0].cpu().numpy().T
                             melsp_woF = x_identic_woF[0].cpu().numpy().T
                             melsp_woR = x_identic_woR[0].cpu().numpy().T
                             melsp_woC = x_identic_woC[0].cpu().numpy().T
@@ -276,5 +327,5 @@ class Solver(object):
                             im3 = ax3.imshow(melsp_woC, aspect='auto', vmin=min_value, vmax=max_value)
                             im4 = ax4.imshow(melsp_woR, aspect='auto', vmin=min_value, vmax=max_value)
                             im5 = ax5.imshow(melsp_woF, aspect='auto', vmin=min_value, vmax=max_value)
-                            plt.savefig(f'{self.sample_dir}/{i+1}_{val_sub[0]}_{k}.png', dpi=150)
+                            plt.savefig(f'{self.sample_dir}/{i+1}_{smp_sub[0]}_{k}.png', dpi=150)
                             plt.close(fig) 

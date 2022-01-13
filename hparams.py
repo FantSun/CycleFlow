@@ -6,16 +6,17 @@ from tfcompat.hparam import HParams
 # Default hyperparameters:
 hparams = HParams(
     # model   
-    freq = 8,
-    dim_neck = 8,
-    freq_2 = 8,
-    dim_neck_2 = 1,
-    freq_3 = 8,
-    dim_neck_3 = 32,
+    freq_c = 8,
+    dim_neck_c = 8,
+    freq_r = 8,
+    dim_neck_r = 1,
+    freq_f = 8,
+    dim_neck_f = 32,
+    freq_t = 192,
     
-    dim_enc = 512,
-    dim_enc_2 = 128,
-    dim_enc_3 = 256,
+    dim_enc_c = 512,
+    dim_enc_r = 128,
+    dim_enc_f = 256,
     
     dim_freq = 80,
     dim_spk_emb = 32,

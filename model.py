@@ -3,9 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from math import ceil 
-from utils import get_mask_from_lengths
-
 
 class LinearNorm(torch.nn.Module):
     def __init__(self, in_dim, out_dim, bias=True, w_init_gain='linear'):
@@ -43,150 +40,98 @@ class ConvNorm(torch.nn.Module):
     
     
     
-class Encoder_t(nn.Module):
+class Encoder_r(nn.Module):
     """Rhythm Encoder
     """
     def __init__(self, hparams):
         super().__init__()
 
-        self.dim_neck_2 = hparams.dim_neck_2
-        self.freq_2 = hparams.freq_2
+        self.dim_neck_r = hparams.dim_neck_r
+        self.freq_r = hparams.freq_r
         self.dim_freq = hparams.dim_freq
-        self.dim_enc_2 = hparams.dim_enc_2
-        self.dim_emb = hparams.dim_spk_emb
+        self.dim_enc_r = hparams.dim_enc_r
         self.chs_grp = hparams.chs_grp
         
         convolutions = []
         for i in range(1):
             conv_layer = nn.Sequential(
-                ConvNorm(self.dim_freq if i==0 else self.dim_enc_2,
-                         self.dim_enc_2,
+                ConvNorm(self.dim_freq if i==0 else self.dim_enc_r,
+                         self.dim_enc_r,
                          kernel_size=5, stride=1,
                          padding=2,
                          dilation=1, w_init_gain='relu'),
-                nn.GroupNorm(self.dim_enc_2//self.chs_grp, self.dim_enc_2))
+                nn.GroupNorm(self.dim_enc_r//self.chs_grp, self.dim_enc_r))
             convolutions.append(conv_layer)
-        self.convolutions = nn.ModuleList(convolutions)
+        self.convolutions_r = nn.ModuleList(convolutions)
         
-        self.lstm = nn.LSTM(self.dim_enc_2, self.dim_neck_2, 1, batch_first=True, bidirectional=True)
+        self.lstm_r = nn.LSTM(self.dim_enc_r, self.dim_neck_r, 1, batch_first=True, bidirectional=True)
         
 
     def forward(self, x, mask):
                 
-        for conv in self.convolutions:
+        for conv in self.convolutions_r:
             x = F.relu(conv(x))
         x = x.transpose(1, 2)
         
-        self.lstm.flatten_parameters()
-        outputs, _ = self.lstm(x)
+        self.lstm_r.flatten_parameters()
+        outputs, _ = self.lstm_r(x)
         if mask is not None:
             outputs = outputs * mask
-        out_forward = outputs[:, :, :self.dim_neck_2]
-        out_backward = outputs[:, :, self.dim_neck_2:]
+        out_forward = outputs[:, :, :self.dim_neck_r]
+        out_backward = outputs[:, :, self.dim_neck_r:]
             
-        codes = torch.cat((out_forward[:,self.freq_2-1::self.freq_2,:], out_backward[:,::self.freq_2,:]), dim=-1)
+        codes = torch.cat((out_forward[:,self.freq_r-1::self.freq_r,:], out_backward[:,::self.freq_r,:]), dim=-1)
 
         return codes        
     
     
     
-class Encoder_6(nn.Module):
-    """F0 encoder
-    """
-    def __init__(self, hparams):
-        super().__init__()
-
-        self.dim_neck_3 = hparams.dim_neck_3
-        self.freq_3 = hparams.freq_3
-        self.dim_f0 = hparams.dim_f0
-        self.dim_enc_3 = hparams.dim_enc_3
-        self.dim_emb = hparams.dim_spk_emb
-        self.chs_grp = hparams.chs_grp
-        self.register_buffer('len_org', torch.tensor(hparams.max_len_pad))
-        
-        convolutions = []
-        for i in range(3):
-            conv_layer = nn.Sequential(
-                ConvNorm(self.dim_f0 if i==0 else self.dim_enc_3,
-                         self.dim_enc_3,
-                         kernel_size=5, stride=1,
-                         padding=2,
-                         dilation=1, w_init_gain='relu'),
-                nn.GroupNorm(self.dim_enc_3//self.chs_grp, self.dim_enc_3))
-            convolutions.append(conv_layer)
-        self.convolutions = nn.ModuleList(convolutions)
-        
-        self.lstm = nn.LSTM(self.dim_enc_3, self.dim_neck_3, 1, batch_first=True, bidirectional=True)
-        
-        self.interp = InterpLnr(hparams)
-
-    def forward(self, x):
-                
-        for conv in self.convolutions:
-            x = F.relu(conv(x))
-            x = x.transpose(1, 2)
-            x = self.interp(x, self.len_org.expand(x.size(0)))
-            x = x.transpose(1, 2)
-        x = x.transpose(1, 2)    
-        
-        self.lstm.flatten_parameters()
-        outputs, _ = self.lstm(x)
-        out_forward = outputs[:, :, :self.dim_neck_3]
-        out_backward = outputs[:, :, self.dim_neck_3:]
-        
-        codes = torch.cat((out_forward[:,self.freq_3-1::self.freq_3,:],
-                           out_backward[:,::self.freq_3,:]), dim=-1)    
-
-        return codes 
-    
-    
-    
-class Encoder_7(nn.Module):
+class Encoder_cf(nn.Module):
     """Sync Encoder module
     """
     def __init__(self, hparams):
         super().__init__()
 
-        self.dim_neck = hparams.dim_neck
-        self.freq = hparams.freq
-        self.freq_3 = hparams.freq_3
-        self.dim_enc = hparams.dim_enc
-        self.dim_enc_3 = hparams.dim_enc_3
+        self.dim_neck_c = hparams.dim_neck_c
+        self.freq_c = hparams.freq_c
+        self.freq_f = hparams.freq_f
+        self.dim_enc_c = hparams.dim_enc_c
+        self.dim_enc_f = hparams.dim_enc_f
         self.dim_freq = hparams.dim_freq
         self.chs_grp = hparams.chs_grp
         self.register_buffer('len_org', torch.tensor(hparams.max_len_pad))
-        self.dim_neck_3 = hparams.dim_neck_3
+        self.dim_neck_f = hparams.dim_neck_f
         self.dim_f0 = hparams.dim_f0
         
-        # convolutions for code 1
+        # convolutions for content
         convolutions = []
         for i in range(3):
             conv_layer = nn.Sequential(
-                ConvNorm(self.dim_freq if i==0 else self.dim_enc,
-                         self.dim_enc,
+                ConvNorm(self.dim_freq if i==0 else self.dim_enc_c,
+                         self.dim_enc_c,
                          kernel_size=5, stride=1,
                          padding=2,
                          dilation=1, w_init_gain='relu'),
-                nn.GroupNorm(self.dim_enc//self.chs_grp, self.dim_enc))
+                nn.GroupNorm(self.dim_enc_c//self.chs_grp, self.dim_enc_c))
             convolutions.append(conv_layer)
-        self.convolutions_1 = nn.ModuleList(convolutions)
+        self.convolutions_c = nn.ModuleList(convolutions)
         
-        self.lstm_1 = nn.LSTM(self.dim_enc, self.dim_neck, 2, batch_first=True, bidirectional=True)
+        self.lstm_c = nn.LSTM(self.dim_enc_c, self.dim_neck_c, 2, batch_first=True, bidirectional=True)
         
-        # convolutions for f0
+        # convolutions for pitch
         convolutions = []
         for i in range(3):
             conv_layer = nn.Sequential(
-                ConvNorm(self.dim_f0 if i==0 else self.dim_enc_3,
-                         self.dim_enc_3,
+                ConvNorm(self.dim_f0 if i==0 else self.dim_enc_f,
+                         self.dim_enc_f,
                          kernel_size=5, stride=1,
                          padding=2,
                          dilation=1, w_init_gain='relu'),
-                nn.GroupNorm(self.dim_enc_3//self.chs_grp, self.dim_enc_3))
+                nn.GroupNorm(self.dim_enc_f//self.chs_grp, self.dim_enc_f))
             convolutions.append(conv_layer)
-        self.convolutions_2 = nn.ModuleList(convolutions)
+        self.convolutions_f = nn.ModuleList(convolutions)
         
-        self.lstm_2 = nn.LSTM(self.dim_enc_3, self.dim_neck_3, 1, batch_first=True, bidirectional=True)
+        self.lstm_f = nn.LSTM(self.dim_enc_f, self.dim_neck_f, 1, batch_first=True, bidirectional=True)
         
         self.interp = InterpLnr(hparams)
 
@@ -196,52 +141,51 @@ class Encoder_7(nn.Module):
         x = x_f0[:, :self.dim_freq, :]
         f0 = x_f0[:, self.dim_freq:, :]
         
-        for conv_1, conv_2 in zip(self.convolutions_1, self.convolutions_2):
+        for conv_1, conv_2 in zip(self.convolutions_c, self.convolutions_f):
             x = F.relu(conv_1(x))
             f0 = F.relu(conv_2(f0))
             x_f0 = torch.cat((x, f0), dim=1).transpose(1, 2)
             x_f0 = self.interp(x_f0, self.len_org.expand(x.size(0)))
             x_f0 = x_f0.transpose(1, 2)
-            x = x_f0[:, :self.dim_enc, :]
-            f0 = x_f0[:, self.dim_enc:, :]
+            x = x_f0[:, :self.dim_enc_c, :]
+            f0 = x_f0[:, self.dim_enc_c:, :]
             
             
         x_f0 = x_f0.transpose(1, 2)    
-        x = x_f0[:, :, :self.dim_enc]
-        f0 = x_f0[:, :, self.dim_enc:]
+        x = x_f0[:, :, :self.dim_enc_c]
+        f0 = x_f0[:, :, self.dim_enc_c:]
         
         # code 1
-        x = self.lstm_1(x)[0]
-        f0 = self.lstm_2(f0)[0]
+        x = self.lstm_c(x)[0]
+        f0 = self.lstm_f(f0)[0]
         
-        x_forward = x[:, :, :self.dim_neck]
-        x_backward = x[:, :, self.dim_neck:]
+        x_forward = x[:, :, :self.dim_neck_c]
+        x_backward = x[:, :, self.dim_neck_c:]
         
-        f0_forward = f0[:, :, :self.dim_neck_3]
-        f0_backward = f0[:, :, self.dim_neck_3:]
+        f0_forward = f0[:, :, :self.dim_neck_f]
+        f0_backward = f0[:, :, self.dim_neck_f:]
         
-        codes_x = torch.cat((x_forward[:,self.freq-1::self.freq,:], 
-                             x_backward[:,::self.freq,:]), dim=-1)
+        codes_c = torch.cat((x_forward[:,self.freq_c-1::self.freq_c,:], 
+                             x_backward[:,::self.freq_c,:]), dim=-1)
         
-        codes_f0 = torch.cat((f0_forward[:,self.freq_3-1::self.freq_3,:], 
-                              f0_backward[:,::self.freq_3,:]), dim=-1)
+        codes_f = torch.cat((f0_forward[:,self.freq_f-1::self.freq_f,:], 
+                              f0_backward[:,::self.freq_f,:]), dim=-1)
         
-        return codes_x, codes_f0      
+        return codes_c, codes_f      
     
     
     
-class Decoder_3(nn.Module):
+class Decoder_S(nn.Module):
     """Decoder module
     """
     def __init__(self, hparams):
         super().__init__()
-        self.dim_neck = hparams.dim_neck
-        self.dim_neck_2 = hparams.dim_neck_2
+        self.dim_neck_c = hparams.dim_neck_c
+        self.dim_neck_r = hparams.dim_neck_r
+        self.dim_neck_f = hparams.dim_neck_f
         self.dim_emb = hparams.dim_spk_emb
-        self.dim_freq = hparams.dim_freq
-        self.dim_neck_3 = hparams.dim_neck_3
         
-        self.lstm = nn.LSTM(self.dim_neck*2+self.dim_neck_2*2+self.dim_neck_3*2+self.dim_emb, 
+        self.lstm = nn.LSTM(self.dim_neck_c*2+self.dim_neck_r*2+self.dim_neck_f*2+self.dim_emb, 
                             512, 3, batch_first=True, bidirectional=True)
         
         self.linear_projection = LinearNorm(1024, self.dim_freq)
@@ -256,16 +200,16 @@ class Decoder_3(nn.Module):
     
     
     
-class Decoder_4(nn.Module):
+class Decoder_P(nn.Module):
     """For F0 converter
     """
     def __init__(self, hparams):
         super().__init__()
-        self.dim_neck_2 = hparams.dim_neck_2
+        self.dim_neck_r = hparams.dim_neck_r
+        self.dim_neck_f = hparams.dim_neck_f
         self.dim_f0 = hparams.dim_f0
-        self.dim_neck_3 = hparams.dim_neck_3
         
-        self.lstm = nn.LSTM(self.dim_neck_2*2+self.dim_neck_3*2, 
+        self.lstm = nn.LSTM(self.dim_neck_r*2+self.dim_neck_f*2, 
                             256, 2, batch_first=True, bidirectional=True)
         
         self.linear_projection = LinearNorm(512, self.dim_f0)
@@ -280,159 +224,57 @@ class Decoder_4(nn.Module):
     
     
 
-class Generator_3(nn.Module):
-    """SpeechSplit model"""
-    def __init__(self, hparams):
-        super().__init__()
-        
-        self.encoder_1 = Encoder_7(hparams)
-        self.encoder_2 = Encoder_t(hparams)
-        self.decoder = Decoder_3(hparams)
-    
-        self.freq = hparams.freq
-        self.freq_2 = hparams.freq_2
-        self.freq_3 = hparams.freq_3
-
-
-    def forward(self, x_f0, x_org, c_trg, r=None, emb=False):
-        
-        x_1 = x_f0.transpose(2,1)
-        codes_x, codes_f0 = self.encoder_1(x_1)
-        code_exp_1 = codes_x.repeat_interleave(self.freq, dim=1)
-        code_exp_3 = codes_f0.repeat_interleave(self.freq_3, dim=1)
-        
-        x_2 = x_org.transpose(2,1)
-        codes_2 = self.encoder_2(x_2, None)
-        if r:
-            codes_2 = r
-        code_exp_2 = codes_2.repeat_interleave(self.freq_2, dim=1)
-        encoder_outputs = torch.cat((code_exp_1, code_exp_2, code_exp_3, 
-                                     c_trg.unsqueeze(1).expand(-1,x_1.size(-1),-1)), dim=-1)
-        
-        mel_outputs = self.decoder(encoder_outputs)
-
-        if emb:
-            return mel_outputs, codes_x.reshape(codes_x.shape[0], -1), codes_2.reshape(codes_x.shape[0], -1), codes_f0.reshape(codes_f0.shape[0], -1)
-        else:
-            return mel_outputs
-    
-    
-    def rhythm(self, x_org):
-        x_2 = x_org.transpose(2,1)
-        codes_2 = self.encoder_2(x_2, None)
-        
-        return codes_2
-
-    def content(self, x_f0):
-        x_1 = x_f0.transpose(2,1)
-        codes_x, _ = self.encoder_1(x_1)
-        
-        return codes_x
-    
-    
-class Generator_6(nn.Module):
-    """F0 converter
-    """
-    def __init__(self, hparams):
-        super().__init__()
-        
-        self.encoder_2 = Encoder_t(hparams)
-        self.encoder_3 = Encoder_6(hparams)
-        self.decoder = Decoder_4(hparams)
-        self.freq_2 = hparams.freq_2
-        self.freq_3 = hparams.freq_3
-
-
-    def forward(self, x_org, f0_trg):
-        
-        x_2 = x_org.transpose(2,1)
-        codes_2 = self.encoder_2(x_2, None)
-        code_exp_2 = codes_2.repeat_interleave(self.freq_2, dim=1)
-        
-        x_3 = f0_trg.transpose(2,1)
-        codes_3 = self.encoder_3(x_3)
-        code_exp_3 = codes_3.repeat_interleave(self.freq_3, dim=1)
-        
-        encoder_outputs = torch.cat((code_exp_2, code_exp_3), dim=-1)
-        
-        f0_outputs = self.decoder(encoder_outputs)
-        
-        return f0_outputs
-    
-
-class Generator_loop(nn.Module):
-    """SpeechSplit model"""
+class Encoder_cyc(nn.Module):
+    """Encoder"""
     def __init__(self, hparams):
         super().__init__()
 
-        self.encoder_1 = Encoder_7(hparams)
-        self.encoder_2 = Encoder_t(hparams)
-        self.decoder_S = Decoder_3(hparams)
-        self.decoder_P = Decoder_4(hparams)
+        self.encoder_cf = Encoder_cf(hparams)
+        self.encoder_r = Encoder_r(hparams)
+        self.encoder_t = Encoder_t(hparams)
 
-        self.freq = hparams.freq
-        self.freq_2 = hparams.freq_2
-        self.freq_3 = hparams.freq_3
-
-
-    def forward(self, x_f0, x_org, c_trg, mode='test', emb=False, emb_nor=False, c_conv=None):
+    def forward(self, x_f0, x_org):
 
         x_1 = x_f0.transpose(2,1)
-        codes_x, codes_f0 = self.encoder_1(x_1)
-        if c_conv != None:
-            codes_x += c_conv
-        code_exp_1 = codes_x.repeat_interleave(self.freq, dim=1) # content
-        code_exp_3 = codes_f0.repeat_interleave(self.freq_3, dim=1) # pitch
+        codes_c, codes_f = self.encoder_cf(x_1)
 
         x_2 = x_org.transpose(2,1)
-        codes_2 = self.encoder_2(x_2, None)
-        code_exp_2 = codes_2.repeat_interleave(self.freq_2, dim=1) # rhythm
-        Z_S = torch.cat((code_exp_1, code_exp_2, code_exp_3,
-                                     c_trg.unsqueeze(1).expand(-1,x_1.size(-1),-1)), dim=-1)
-        Z_P = torch.cat((code_exp_2, code_exp_3), dim=-1)
+        codes_r = self.encoder_r(x_2, None)
 
+        return codes_r, codes_c, codes_f
+
+
+class Decoder_cyc(nn.Module):
+    """CycleFlow model"""
+    def __init__(self, hparams):
+        super().__init__()
+
+        self.decoder_S = Decoder_S(hparams)
+        self.decoder_P = Decoder_P(hparams)
+
+        self.freq_c = hparams.freq_c
+        self.freq_r = hparams.freq_r
+        self.freq_f = hparams.freq_f
+        self.freq_t = hparams.freq_t
+
+
+    def forward(self, codes_t, codes_r, codes_c, codes_f, mode="test"):
+
+        code_exp_c = codes_c.repeat_interleave(self.freq_c, dim=1) # content
+        code_exp_f = codes_f.repeat_interleave(self.freq_f, dim=1) # pitch
+        code_exp_r = codes_r.repeat_interleave(self.freq_r, dim=1) # rhythm
+        code_exp_t = codes_t.repeat_interleave(self.freq_t, dim=1) # timbre
+
+        Z_S = torch.cat((code_exp_c, code_exp_f, code_exp_r, code_exp_t), dim=-1)
         mel_outputs = self.decoder_S(Z_S)
-        f0_outputs = self.decoder_P(Z_P)
 
-        loss_z_l = None
         if mode == 'train':
-            z_select = torch.randint(0, 3, (1,))[0]
-            if z_select == 0:
-                ord_sfl = torch.randperm(code_exp_1.shape[0])
-                code_exp_1 = code_exp_1[ord_sfl]
-            elif z_select == 1:
-                ord_sfl = torch.randperm(code_exp_2.shape[0])
-                code_exp_2 = code_exp_2[ord_sfl]
-            else:
-                ord_sfl = torch.randperm(code_exp_3.shape[0])
-                code_exp_3 = code_exp_3[ord_sfl]
-            Z_S = torch.cat((code_exp_1, code_exp_2, code_exp_3,
-                                         c_trg.unsqueeze(1).expand(-1,x_1.size(-1),-1)), dim=-1)
-            Z_P = torch.cat((code_exp_2, code_exp_3), dim=-1)
-            mel_sfl = self.decoder_S(Z_S)
-            f0_sfl = self.decoder_P(Z_P)
-            x_f0_sfl = torch.cat((mel_sfl, f0_sfl), dim=-1)
-
-            x_1 = x_f0_sfl.transpose(2,1)
-            codes_x, codes_f0 = self.encoder_1(x_1)
-            code_exp_1 = codes_x.repeat_interleave(self.freq, dim=1)
-            code_exp_3 = codes_f0.repeat_interleave(self.freq_3, dim=1)
-
-            x_2 = mel_sfl.transpose(2,1)
-            codes_2 = self.encoder_2(x_2, None)
-            code_exp_2 = codes_2.repeat_interleave(self.freq_2, dim=1)
-            Z_S_l = torch.cat((code_exp_1, code_exp_2, code_exp_3,
-                                         c_trg.unsqueeze(1).expand(-1,x_1.size(-1),-1)), dim=-1)
-            loss_z_l = F.mse_loss(Z_S, Z_S_l, reduction='mean')
-
-        if emb:
-            return mel_outputs, codes_x.reshape(codes_x.shape[0], -1), codes_2.reshape(codes_x.shape[0], -1), codes_f0.reshape(codes_f0.shape[0], -1)
-        elif emb_nor:
-            return mel_outputs, codes_x, codes_2, codes_f0
-        elif mode == 'train':
-            return mel_outputs, f0_outputs, loss_z_l
+            Z_P = torch.cat((code_exp_r, code_exp_f), dim=-1)
+            f0_outputs = self.decoder_P(Z_P)
+            return mel_outputs, f0_outputs
         else:
             return mel_outputs
+
 
 
 class InterpLnr(nn.Module):
